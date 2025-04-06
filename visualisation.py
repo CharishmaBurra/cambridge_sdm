@@ -83,8 +83,8 @@ def main():
     Example driver function to visualize both overall_metrics.csv
     and phone_level_stats.csv. Adapt paths to match your real output files.
     """
-    overall_metrics_path = "/Volumes/New Folder/Python Practice/cambridge/output/overall_metrics.csv"
-    phone_stats_path = "/Volumes/New Folder/Python Practice/cambridge/output/phone_level_stats.csv"
+    overall_metrics_path = "/overall_metrics.csv"
+    phone_stats_path = "/phone_level_stats.csv"
 
     visualize_overall_metrics(overall_metrics_path)
     visualize_phone_level_stats(phone_stats_path)
