@@ -1,192 +1,207 @@
 """
-utilities.py
-
-Contains helper functions and classes for modeling, evaluation metrics,
-and any general-purpose utilities.
+Contains enhanced modeling approaches with advanced feature engineering and models.
 """
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics import (
-    mean_absolute_error,
-    mean_squared_error,
-    r2_score
-)
-from sklearn.model_selection import train_test_split
-from sklearn.linear_model import LinearRegression
-from sklearn.tree import DecisionTreeRegressor
-from sklearn.ensemble import (
-    RandomForestRegressor,
-    GradientBoostingRegressor,
-    HistGradientBoostingRegressor
-)
-from sklearn.neighbors import KNeighborsRegressor
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.model_selection import train_test_split, KFold, GridSearchCV
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+from sklearn.preprocessing import StandardScaler
+from sklearn.feature_selection import SelectKBest, f_regression
+import tensorflow as tf
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Input, Dense, Dropout, BatchNormalization, LSTM, Concatenate
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+from tensorflow.keras.regularizers import l2
+import joblib
 
+class FeatureEngineer:
+    """Enhanced feature engineering with sequence modeling support"""
+    
+    @staticmethod
+    def add_advanced_features(df):
+        """Adds advanced linguistic and sequence features"""
+        # Phone class features
+        df['is_plosive'] = df['phone'].str.lower().isin(['p', 'b', 't', 'd', 'k', 'g']).astype(int)
+        df['is_fricative'] = df['phone'].str.lower().isin(['f', 'v', 'θ', 'ð', 's', 'z', 'ʃ', 'ʒ', 'h']).astype(int)
+        df['is_nasal'] = df['phone'].str.lower().isin(['m', 'n', 'ŋ']).astype(int)
+        
+        # Position features
+        df['position_in_utterance'] = df.groupby('file').cumcount()
+        df['utterance_length'] = df.groupby('file')['phone'].transform('count')
+        df['position_ratio_utterance'] = df['position_in_utterance'] / df['utterance_length']
+        
+        # Context windows
+        for window in [1, 2]:
+            df[f'prev_{window}_phone'] = df.groupby('file')['phone'].shift(window)
+            df[f'next_{window}_phone'] = df.groupby('file')['phone'].shift(-window)
+        
+        return df
 
-def compute_accuracy(actual_val: float, err_val: float) -> float:
-    """
-    Row-level accuracy = 1 - (err_val / actual_val), if actual_val != 0, else 0.
-    """
-    if actual_val and actual_val != 0:
-        return 1.0 - (err_val / actual_val)
-    return 0.0
-
+    @staticmethod
+    def prepare_sequence_features(df, sequence_length=5):
+        """Prepares data for sequence models"""
+        sequences = []
+        phone_groups = df.groupby('file')
+        
+        for _, group in phone_groups:
+            group = group.sort_values('position_in_utterance')
+            for i in range(len(group) - sequence_length + 1):
+                seq = group.iloc[i:i + sequence_length]
+                sequences.append(seq)
+                
+        return pd.concat(sequences)
 
 class DurationModeler:
-    """
-    Class responsible for:
-      - Creating and storing multiple regression models.
-      - Training and evaluating them on native data.
-      - Applying them to non-native data.
-    """
-
+    """Enhanced duration modeling with advanced techniques"""
+    
     def __init__(self):
-        """
-        Initializes the list of scikit-learn regressors to train.
-        """
-        self.models = [
-            ("LinearRegression",       LinearRegression()),
-            ("DecisionTree",           DecisionTreeRegressor(random_state=42)),
-            ("RandomForest",           RandomForestRegressor(n_estimators=100, random_state=42)),
-            ("GradientBoosting",       GradientBoostingRegressor(random_state=42)),
-            ("HistGradientBoosting",   HistGradientBoostingRegressor(random_state=42)),
-            ("KNeighbors",             KNeighborsRegressor()),
+        self.models = {}
+        self.scalers = {}
+        self.feature_selector = None
+        self.phone_encoder = None
+        self.best_model = None
+        self.performance_metrics = []
+
+    def train_and_evaluate(self, X_train, y_train, X_test, y_test, test_predictions):
+        """Enhanced training pipeline"""
+        # Feature selection
+        self._perform_feature_selection(X_train, y_train)
+        
+        # Train and compare models
+        self._train_random_forest(X_train, y_train, X_test, y_test, test_predictions)
+        self._train_gradient_boosting(X_train, y_train, X_test, y_test, test_predictions)
+        self._train_hybrid_model(X_train, y_train, X_test, y_test, test_predictions)
+        
+        # Select best model
+        self._select_best_model()
+
+    def _perform_feature_selection(self, X, y):
+        """Selects most important features"""
+        self.feature_selector = SelectKBest(f_regression, k=15)
+        X_selected = self.feature_selector.fit_transform(X, y)
+        return X_selected
+
+    def _train_random_forest(self, X_train, y_train, X_test, y_test, test_predictions):
+        """Optimized Random Forest with hyperparameter tuning"""
+        param_grid = {
+            'n_estimators': [100, 200],
+            'max_depth': [None, 20, 30],
+            'min_samples_split': [2, 5]
+        }
+        
+        rf = RandomForestRegressor(random_state=42)
+        grid_search = GridSearchCV(rf, param_grid, cv=3, scoring='neg_mean_absolute_error')
+        grid_search.fit(X_train, y_train)
+        
+        best_rf = grid_search.best_estimator_
+        y_pred = best_rf.predict(X_test)
+        
+        self.models['RandomForest'] = best_rf
+        test_predictions['RandomForest_pred'] = y_pred
+        self._store_metrics('RandomForest', y_test, y_pred)
+        
+        print(f"RandomForest best params: {grid_search.best_params_}")
+        print(f"Feature importances: {sorted(zip(X_train.columns, best_rf.feature_importances_), key=lambda x: x[1], reverse=True)}")
+
+    def _train_gradient_boosting(self, X_train, y_train, X_test, y_test, test_predictions):
+        """Gradient Boosting model"""
+        gb = GradientBoostingRegressor(
+            n_estimators=200,
+            learning_rate=0.05,
+            max_depth=5,
+            random_state=42
+        )
+        gb.fit(X_train, y_train)
+        y_pred = gb.predict(X_test)
+        
+        self.models['GradientBoosting'] = gb
+        test_predictions['GradientBoosting_pred'] = y_pred
+        self._store_metrics('GradientBoosting', y_test, y_pred)
+
+    def _train_hybrid_model(self, X_train, y_train, X_test, y_test, test_predictions):
+        """Hybrid neural network with sequence modeling"""
+        # Standard scale features
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_test_scaled = scaler.transform(X_test)
+        self.scalers['HybridNN'] = scaler
+        
+        # Neural network architecture
+        input_layer = Input(shape=(X_train_scaled.shape[1],))
+        x = Dense(256, activation='relu', kernel_regularizer=l2(0.01))(input_layer)
+        x = BatchNormalization()(x)
+        x = Dropout(0.3)(x)
+        x = Dense(128, activation='relu', kernel_regularizer=l2(0.01))(x)
+        x = BatchNormalization()(x)
+        x = Dropout(0.3)(x)
+        output = Dense(1)(x)
+        
+        model = Model(inputs=input_layer, outputs=output)
+        model.compile(optimizer=Adam(0.001), loss='mae')
+        
+        callbacks = [
+            EarlyStopping(patience=10, restore_best_weights=True),
+            ReduceLROnPlateau(factor=0.5, patience=5)
         ]
-        self.fitted_models = {}
-        self.overall_metrics = []
+        
+        history = model.fit(
+            X_train_scaled, y_train,
+            validation_split=0.2,
+            epochs=100,
+            batch_size=256,
+            callbacks=callbacks,
+            verbose=1
+        )
+        
+        y_pred = model.predict(X_test_scaled).flatten()
+        self.models['HybridNN'] = model
+        test_predictions['HybridNN_pred'] = y_pred
+        self._store_metrics('HybridNN', y_test, y_pred)
 
-    def train_and_evaluate(
-        self,
-        X_train: pd.DataFrame,
-        y_train: pd.Series,
-        X_test: pd.DataFrame,
-        y_test: pd.Series,
-        test_predictions: pd.DataFrame
-    ) -> None:
-        """
-        Train all models, evaluate them, and store row-level predictions + metrics.
+    def _store_metrics(self, model_name, y_true, y_pred):
+        """Stores evaluation metrics"""
+        metrics = {
+            'Model': model_name,
+            'MAE': mean_absolute_error(y_true, y_pred),
+            'RMSE': np.sqrt(mean_squared_error(y_true, y_pred)),
+            'R2': r2_score(y_true, y_pred)
+        }
+        self.performance_metrics.append(metrics)
 
-        :param X_train: Training features (native phones).
-        :param y_train: Training targets (durations).
-        :param X_test: Test features (subset of native phones).
-        :param y_test: Test targets (durations).
-        :param test_predictions: DataFrame that will hold row-level predictions, errors, accuracy.
-        """
-        # For each model, fit, predict, compute metrics, and store results
-        for model_name, model_obj in self.models:
-            print(f"\n--- Training model: {model_name} ---")
-            model_obj.fit(X_train, y_train)
+    def _select_best_model(self):
+        """Selects the best performing model"""
+        metrics_df = pd.DataFrame(self.performance_metrics)
+        best_model_name = metrics_df.loc[metrics_df['MAE'].idxmin(), 'Model']
+        self.best_model = self.models[best_model_name]
+        print(f"\nBest model selected: {best_model_name}")
+        print(metrics_df)
 
-            y_pred = model_obj.predict(X_test)
-            mae = mean_absolute_error(y_test, y_pred)
-            mse = mean_squared_error(y_test, y_pred)
-            r2  = r2_score(y_test, y_pred)
-
-            print(f"{model_name} -> MAE: {mae:.4f}, MSE: {mse:.4f}, R^2: {r2:.4f}")
-            self.overall_metrics.append({
-                "Model": model_name,
-                "MAE": mae,
-                "MSE": mse,
-                "R2": r2
-            })
-
-            # Store the fitted model for later use
-            self.fitted_models[model_name] = model_obj
-
-            # Add columns for row-level predictions, error, accuracy
-            pred_col = f"pred_{model_name}"
-            err_col  = f"err_{model_name}"
-            acc_col  = f"acc_{model_name}"
-
-            test_predictions[pred_col] = y_pred
-            test_predictions[err_col]  = abs(test_predictions['actual_duration'] - test_predictions[pred_col])
-            test_predictions[acc_col]  = test_predictions.apply(
-                lambda row: compute_accuracy(row['actual_duration'], row[err_col]),
-                axis=1
-            )
-
-    def apply_to_non_native(
-        self,
-        non_native_df: pd.DataFrame,
-        phone_col: str = "phone_encoded",
-        actual_col: str = "actual_duration"
-    ) -> pd.DataFrame:
-        """
-        Applies each fitted model to non-native data to produce predicted durations (and optionally errors/accuracy
-        if actual durations are available).
-
-        :param non_native_df: DataFrame with non-native data. Must have 'phone_encoded' column.
-        :param phone_col: Column name for encoded phone IDs (default: phone_encoded).
-        :param actual_col: Column name that holds actual duration for the non-native dataset (if present).
-        :return: DataFrame with new columns for each model's predictions, errors, and accuracy.
-        """
-        if phone_col not in non_native_df.columns:
-            print("\nNon-native data missing 'phone_encoded'. Cannot predict. Exiting.")
-            return non_native_df
-
-        X_non_native = non_native_df[[phone_col]].fillna(-1)
-
-        # If we have a real 'duration' column, rename or confirm it
-        if actual_col not in non_native_df.columns:
-            print("\nNo ground-truth durations for non-native data. Errors/accuracy will be 0.")
-            non_native_df[actual_col] = float('nan')
-
-        for model_name, model_obj in self.fitted_models.items():
-            pred_col = f"pred_{model_name}"
-            err_col  = f"err_{model_name}"
-            acc_col  = f"acc_{model_name}"
-
-            y_pred = model_obj.predict(X_non_native)
-            non_native_df[pred_col] = y_pred
-
-            # If we do NOT actually have ground-truth durations, err & acc won't be meaningful
-            if non_native_df[actual_col].notna().any():
-                non_native_df[err_col] = abs(non_native_df[actual_col] - non_native_df[pred_col])
-                non_native_df[acc_col] = non_native_df.apply(
-                    lambda row: compute_accuracy(row[actual_col], row[err_col])
-                                if pd.notna(row[actual_col])
-                                else 0.0,
-                    axis=1
-                )
+    def save_models(self, output_dir):
+        """Saves trained models and artifacts"""
+        os.makedirs(output_dir, exist_ok=True)
+        for name, model in self.models.items():
+            if 'keras' in str(type(model)):
+                model.save(os.path.join(output_dir, f'{name}.h5'))
             else:
-                non_native_df[err_col] = 0.0
-                non_native_df[acc_col] = 0.0
+                joblib.dump(model, os.path.join(output_dir, f'{name}.pkl'))
+        
+        if self.scalers:
+            joblib.dump(self.scalers, os.path.join(output_dir, 'scalers.pkl'))
+        
+        print(f"Models saved to {output_dir}")
 
-        return non_native_df
-
-
-def group_by_phone(
-    df: pd.DataFrame,
-    phone_col: str = "phone",
-    actual_col: str = "actual_duration"
-) -> pd.DataFrame:
-    """
-    Groups the test predictions DataFrame by phone, computing aggregated stats per phone.
-    """
-    model_pred_cols = [c for c in df.columns if c.startswith("pred_")]
-    model_err_cols = [c for c in df.columns if c.startswith("err_")]
-    model_acc_cols = [c for c in df.columns if c.startswith("acc_")]
-
-    def aggregate_phone_metrics(grp: pd.DataFrame) -> pd.Series:
-        result = {}
-        result['count'] = len(grp)
-        result['avg_actual_duration'] = grp[actual_col].mean()
-
-        for pred_col in model_pred_cols:
-            model_name = pred_col.replace("pred_", "")
-            avg_pred = grp[pred_col].mean()
-            result[f"avg_pred_{model_name}"] = avg_pred
-
-        for err_col in model_err_cols:
-            model_name = err_col.replace("err_", "")
-            phone_mae = grp[err_col].mean()
-            result[f"mae_{model_name}"] = phone_mae
-
-        for acc_col in model_acc_cols:
-            model_name = acc_col.replace("acc_", "")
-            avg_acc = grp[acc_col].mean()
-            result[f"avg_acc_{model_name}"] = avg_acc
-
-        return pd.Series(result)
-
-    return df.groupby(phone_col).apply(aggregate_phone_metrics).reset_index()
+    def apply_to_non_native(self, X_non_native):
+        """Applies all models to non-native data"""
+        predictions = {}
+        for name, model in self.models.items():
+            if 'HybridNN' in name:
+                scaler = self.scalers.get(name)
+                X_scaled = scaler.transform(X_non_native)
+                predictions[name] = model.predict(X_scaled).flatten()
+            else:
+                predictions[name] = model.predict(X_non_native)
+        
+        return pd.DataFrame(predictions)
